@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from pdf2image import convert_from_path
+from pdf2image import convert_from_path, convert_from_bytes
 import os
 import fitz  # PyMuPDF
 from pathlib import Path
@@ -80,25 +80,25 @@ def _detect_table_worker(args: Tuple[int, np.ndarray, float]) -> Optional[int]:
 
 class TableDetectionService:
     """
-    Service to detect pages containing tables in a PDF document using a
+    Service to detect pages containing tables in PDF content (bytes) using a
     pre-trained layout detection model.
     """
 
     def __init__(
         self,
-        pdf_path: str,
-        output_folder: str,
+        output_folder: str, # Keep output folder for potential saving/debugging
+        pdf_content: bytes, # Changed from pdf_path
         artifacts_path: str = "artifacts/model_artifacts/layout",
         dpi: int = 300,
         score_threshold: float = 0.5,
-        device: Optional[str] = None, # Allow manual device override
+        device: Optional[str] = None,
     ):
         """
-        Initializes the TableDetectionService.
+        Initializes the TableDetectionService with PDF content as bytes.
 
         Args:
-            pdf_path: Path to the input PDF file.
-            output_folder: Path to the directory where output PDFs will be saved.
+            output_folder: Path to a directory (used if saving blobs later).
+            pdf_content: The content of the PDF file as bytes.
             artifacts_path: Path to the local directory containing the layout
                             model artifacts (e.g., model.safetensors).
             dpi: Dots per inch resolution for rendering PDF pages to images.
@@ -106,7 +106,8 @@ class TableDetectionService:
             device: The device to run the model on ('cpu', 'cuda', etc.).
                     If None, automatically selects CUDA if available, else CPU.
         """
-        self.pdf_path = Path(pdf_path)
+        # self.pdf_path = Path(pdf_path) # Removed
+        self.pdf_content = pdf_content # Added
         self.output_folder = Path(output_folder)
         self.artifacts_path = Path(artifacts_path)
         self.dpi = dpi
@@ -121,7 +122,6 @@ class TableDetectionService:
         else:
             self.device = "cpu"
         print(f"Using device: {self.device}")
-
 
         # Validate artifacts path immediately
         model_file = self.artifacts_path / "model.safetensors"
@@ -138,17 +138,18 @@ class TableDetectionService:
 
     def pdf_to_images(self) -> List[Tuple[int, np.ndarray]]:
         """
-        Converts PDF pages to a list of images.
+        Converts PDF content (bytes) to a list of images.
 
         Returns:
             A list of tuples, each containing (page_number, image_data_as_numpy_array).
         """
-        print(f"Converting '{self.pdf_path.name}' to images at {self.dpi} DPI...")
+        print(f"Converting PDF content ({len(self.pdf_content)} bytes) to images at {self.dpi} DPI...")
         start_time = time.time()
         try:
-            pages = convert_from_path(str(self.pdf_path), dpi=self.dpi)
+            # Use convert_from_bytes instead of convert_from_path
+            pages = convert_from_bytes(self.pdf_content, dpi=self.dpi)
         except Exception as e:
-            print(f"Error during PDF to image conversion: {e}")
+            print(f"Error during PDF content to image conversion: {e}")
             return [] # Return empty list on error
 
         images = []
@@ -165,36 +166,43 @@ class TableDetectionService:
 
     # Removed detect_table method (now handled by _detect_table_worker)
 
-    def save_page_as_pdf(self, page_number: int) -> None:
+    def extract_page_blob(self, page_number: int) -> Optional[bytes]:
         """
-        Extracts a single page from the source PDF and saves it as a new PDF.
+        Extracts a single page from the source PDF content and returns it as bytes.
 
         Args:
             page_number: The 1-based index of the page to extract.
+        
+        Returns:
+            The content of the extracted page as a PDF blob (bytes), or None on error.
         """
-        output_path = self.output_folder / f"page_{page_number}.pdf"
         try:
-            with fitz.open(str(self.pdf_path)) as doc, fitz.open() as new_doc:
+            # Open PDF from bytes
+            with fitz.open("pdf", self.pdf_content) as doc, fitz.open() as new_doc:
                  # fitz uses 0-based indexing
                 new_doc.insert_pdf(doc, from_page=page_number - 1, to_page=page_number - 1)
-                new_doc.save(str(output_path))
+                # Return blob instead of saving
+                return new_doc.tobytes()
         except Exception as e:
-            print(f"Error saving page {page_number} to {output_path}: {e}")
+            print(f"Error extracting page {page_number} blob: {e}")
+            return None
 
-    def process_pdf(self) -> List[int]:
+    def process_pdf(self) -> List[Tuple[int, bytes]]:
         """
-        Processes the PDF to find pages with tables and saves them individually.
+        Processes the PDF content to find pages with tables and returns them as blobs.
 
         Uses multiprocessing for parallel page detection.
 
         Returns:
-            A sorted list of page numbers identified as containing tables.
+            A list of tuples, where each tuple contains:
+            (page_number, page_content_blob)
+            The list is sorted by page number.
         """
         overall_start_time = time.time()
 
         images = self.pdf_to_images()
         if not images:
-            print("No images generated from PDF. Aborting.")
+            print("No images generated from PDF content. Aborting.")
             return []
 
         # Prepare arguments for the worker function
@@ -205,7 +213,8 @@ class TableDetectionService:
         ]
 
         # Use multiprocessing pool
-        num_workers = max(1, os.cpu_count() - 1) if os.cpu_count() else 1
+        cpu_cores = os.cpu_count()
+        num_workers = max(1, cpu_cores - 1) if cpu_cores is not None else 1
         print(f"Starting parallel table detection with {num_workers} workers...")
         detection_start_time = time.time()
 
@@ -232,30 +241,77 @@ class TableDetectionService:
 
         print(f"Found {len(candidate_pages)} pages with potential tables: {candidate_pages}")
 
-        # Save the identified pages sequentially
+        # Extract page blobs for the identified pages
+        page_blobs: List[Tuple[int, bytes]] = []
         if candidate_pages:
-            print("Saving identified pages as PDFs...")
-            save_start_time = time.time()
-            # Could potentially parallelize saving too, but might cause disk I/O contention
+            print("Extracting identified page blobs...")
+            extract_start_time = time.time()
             for page_number in candidate_pages:
-                self.save_page_as_pdf(page_number)
-            save_time = time.time()
-            print(f"Saving pages took {save_time - save_start_time:.2f} seconds.")
+                page_blob = self.extract_page_blob(page_number)
+                if page_blob:
+                    page_blobs.append((page_number, page_blob))
+            extract_time = time.time()
+            print(f"Page blob extraction took {extract_time - extract_start_time:.2f} seconds.")
         else:
-            print("No pages with tables found to save.")
+            print("No pages with tables found to extract.")
 
         overall_end_time = time.time()
         print(f"Total processing time: {overall_end_time - overall_start_time:.2f} seconds.")
-        return candidate_pages
+        # Return list of (page_number, page_blob) tuples
+        return page_blobs
 
 # Example usage:
 def main():
-    pdf_path = "data/pdfs/2022_10k.pdf"  # Make sure this path is correct
-    output_folder = "output/pdf_pages"
-    # Specify the path to your downloaded artifacts if different from the default
-    # artifacts_dir = "path/to/your/artifacts/layout_model" 
-    service = TableDetectionService(pdf_path, output_folder, dpi=150, score_threshold=0.9)
-    service.process_pdf()
+    pdf_path = Path("data/pdfs/2022_10k.pdf")  # Path to the source PDF
+    output_folder = Path("output/pdf_pages")
+    artifacts_dir = "artifacts/model_artifacts/layout" # Path to model artifacts
+    dpi_setting = 150 # Example DPI
+    threshold_setting = 0.95 # Example threshold
+
+    # --- Load PDF into a blob --- 
+    try:
+        print(f"Loading PDF file: {pdf_path}")
+        with open(pdf_path, "rb") as f:
+            pdf_blob = f.read()
+        print(f"Loaded {len(pdf_blob)} bytes.")
+    except FileNotFoundError:
+        print(f"Error: Input PDF not found at {pdf_path}")
+        return
+    except Exception as e:
+        print(f"Error reading PDF file: {e}")
+        return
+    
+    # Ensure output directory exists
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    # --- Instantiate the service with the blob --- 
+    service = TableDetectionService(
+        output_folder=str(output_folder), # Pass output folder path as string
+        pdf_content=pdf_blob,             # Pass the loaded blob
+        artifacts_path=artifacts_dir,
+        dpi=dpi_setting,
+        score_threshold=threshold_setting,
+        # device=None # Let it auto-detect or specify 'cpu', 'cuda'
+    )
+
+    # --- Process the PDF blob --- 
+    # Returns a list of tuples: (page_number, page_blob)
+    table_page_blobs = service.process_pdf()
+
+    # --- Save the resulting page blobs to files (for development/testing) ---
+    if table_page_blobs:
+        print(f"\nSaving {len(table_page_blobs)} extracted page blobs to files in '{output_folder}'...")
+        for page_number, page_blob in table_page_blobs:
+            output_file_path = output_folder / f"page_{page_number}.pdf"
+            try:
+                with open(output_file_path, "wb") as f:
+                    f.write(page_blob)
+                # print(f"  Saved: {output_file_path.name}") # Optional print per file
+            except Exception as e:
+                print(f"  Error saving {output_file_path.name}: {e}")
+        print("Finished saving page blobs.")
+    else:
+        print("\nNo table page blobs were extracted to save.")
 
 if __name__ == "__main__":
     main()
