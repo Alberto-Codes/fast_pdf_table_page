@@ -1,0 +1,20 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+
+# Your rule content
+- Use uv for all venv and dep managements https://docs.astral.sh/uv/
+ - uv should have pytests black isort mypy ruff as --dev
+- Use the google python styleguide https://google.github.io/styleguide/pyguide.html
+- Adhere to the D.R.Y. principle https://realpython.com/lessons/dry-principle/
+- for tests only use pytest and related packages https://docs.pytest.org/en/stable/example/index.html
+- organize tests using best practices https://pytest-with-eric.com/pytest-best-practices/pytest-organize-tests/
+- do not use unittest
+- use pytest-mock instead of unittest.mock
+- use pytest-fakefs for mock file activity
+- use pytest-mock-resources where needed
+- use structlog where it makes sense without adding too much code https://www.structlog.org/en/stable/logging-best-practices.html
+- use dev tools via uv to ensure good code
+
