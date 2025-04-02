@@ -1,7 +1,7 @@
 """Test script for the FastTableDetector."""
 from pathlib import Path
 import structlog
-from table_detector import FastTableDetector
+from fast_pdf_table_page import FastTableDetector
 
 # Configure logging
 structlog.configure(
@@ -22,7 +22,17 @@ def process_pdf(pdf_path: Path) -> None:
         )
         
         logger.info("processing_pdf", pdf_path=str(pdf_path))
-        table_pages = detector.find_pages_with_tables(pdf_path)
+        
+        # Read PDF content into bytes
+        try:
+            with open(pdf_path, "rb") as f:
+                pdf_blob = f.read()
+        except IOError as e:
+            logger.error("failed_to_read_pdf", pdf_path=str(pdf_path), error=str(e))
+            return
+
+        # Pass bytes to the detector
+        table_pages = detector.find_pages_with_tables(pdf_blob)
         
         logger.info("pdf_processing_complete",
                    pdf_path=str(pdf_path),

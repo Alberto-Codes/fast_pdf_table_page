@@ -194,33 +194,40 @@ class FastTableDetector:
         has_table = self._has_table_structure(binary)
         return page_num, has_table
 
-    def find_pages_with_tables(self, pdf_path: str | Path, max_workers: int | None = None) -> List[int]:
+    def find_pages_with_tables(self, pdf_input: str | Path | bytes, max_workers: int | None = None) -> List[int]:
         """Find page numbers containing potential tables in a PDF using multiprocessing.
         
         Args:
-            pdf_path: Path to the PDF file
+            pdf_input: Path to the PDF file (str or Path) or PDF content as bytes.
             max_workers: Maximum number of worker processes. If None, uses CPU count.
             
         Returns:
             List of page numbers (0-based) containing potential tables
         """
-        pdf_path = Path(pdf_path)
-        if not pdf_path.exists():
-            raise FileNotFoundError(f"PDF file not found: {pdf_path}")
-
         if max_workers is None:
             max_workers = multiprocessing.cpu_count()
 
         table_pages = []
-        
+        input_type = "path" if isinstance(pdf_input, (str, Path)) else "blob"
+        log_context = {"max_workers": max_workers, "input_type": input_type}
+
+        doc = None
         try:
-            doc = fitz.open(pdf_path)
+            if isinstance(pdf_input, (str, Path)):
+                pdf_path = Path(pdf_input)
+                if not pdf_path.exists():
+                    raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+                log_context["pdf_path"] = str(pdf_path)
+                doc = fitz.open(pdf_path)
+            elif isinstance(pdf_input, bytes):
+                log_context["pdf_blob_size"] = len(pdf_input)
+                doc = fitz.open(stream=pdf_input, filetype="pdf")
+            else:
+                raise TypeError("pdf_input must be a file path (str or Path) or bytes")
+
             total_pages = len(doc)
-            
-            logger.info("starting_table_detection", 
-                       pdf_path=str(pdf_path),
-                       total_pages=total_pages,
-                       max_workers=max_workers)
+            log_context["total_pages"] = total_pages
+            logger.info("starting_table_detection", **log_context)
 
             # Prepare page data for parallel processing
             page_data = []
@@ -235,6 +242,8 @@ class FastTableDetector:
             # Process pages in parallel
             start_time = time.time()
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # Pass self to map function if needed, or make _process_page static
+                # For simplicity, let's assume _process_page uses instance attributes
                 results = list(executor.map(self._process_page, page_data))
             
             # Collect results
@@ -244,10 +253,14 @@ class FastTableDetector:
             logger.info("completed_table_detection",
                        tables_found=len(table_pages),
                        duration_seconds=duration,
-                       pages_per_second=total_pages/duration)
+                       pages_per_second=(total_pages / duration) if duration > 0 else float('inf'),
+                       **log_context) # Add original context back
             
             return table_pages
             
         except Exception as e:
-            logger.error("table_detection_failed", error=str(e))
-            raise 
+            logger.error("table_detection_failed", error=str(e), **log_context)
+            raise
+        finally:
+            if doc:
+                doc.close() 
